@@ -1,0 +1,213 @@
+import sklearn
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib
+import os
+import math
+from functools import partial, reduce
+print(sklearn.__version__)
+
+#####################    Data preprocessing   ########################
+
+##############################################
+##              Data loading                ##
+##############################################
+# dataset path
+cwd = os.getcwd()
+
+demo_path = cwd+'\\data\\demographic.csv'
+diet_path = cwd+'\\data\\diet.csv'
+exam_path = cwd+'\\data\\examination.csv'
+labs_path = cwd+'\\data\\labs.csv'
+med_path  = cwd+'\\data\\medications.csv'
+qn_path   = cwd+'\\data\\questionnaire.csv'
+
+# read data
+dm   = pd.read_csv(demo_path, encoding = 'unicode_escape')
+diet = pd.read_csv(diet_path, encoding = 'unicode_escape')
+exam = pd.read_csv(exam_path, encoding = 'unicode_escape')
+labs = pd.read_csv(labs_path, encoding = 'unicode_escape')
+med  = pd.read_csv(med_path,  encoding = 'unicode_escape')
+qn   = pd.read_csv(qn_path,   encoding = 'unicode_escape')
+
+# check number of features
+features_no = len(dm.columns) + len(diet.columns) + len(exam.columns) + \
+              len(labs.columns) + len(med.columns) + len(qn.columns)
+print(features_no)
+
+# merge all data
+df_list = [dm, diet, exam, labs, qn]
+merge   = partial(pd.merge, how='inner', on='SEQN') 
+df      = reduce(merge, df_list)
+
+# check if there are duplicated SEQN
+print(df.SEQN.duplicated().value_counts())
+
+
+##############################################
+##                 MCQ010                   ##
+##############################################
+# check the number of participants had asthma attack in the past 12 month
+print(df[['SEQN','MCQ010']].groupby('MCQ010').count())
+
+# exclude rows with null values or NA for MCQ010
+# 1 yes; 2 no; 7 refused; 9 dont know
+# MCQ160F (target feature): exclude null values and NA
+df = df[(df.MCQ010.notnull()) & (df.MCQ010 != 7)  & (df.MCQ010 != 9)]
+
+# check MCQ010
+print("MCQ010.describe: ")
+print(df.MCQ010.describe())
+print("MCQ010.counts: ")
+print(df.MCQ010.value_counts())
+
+
+##################################################
+##              Data cleaning                   ##
+##################################################
+# exclude non-numeric values
+df = df.select_dtypes(['number'])
+# exclue columns that have over 50% NaN
+df = df.dropna(thresh = 0.5*len(df), axis =1)
+print(len(df.columns), 'columns left')
+
+# changing target variable coding from 1, 2 to 0 (Negative), 1 (Positive)
+df['MCQ010']=df.apply(lambda x: 1 if x.MCQ010 == 1 else 0, axis='columns')
+vals = df.MCQ010.value_counts()
+
+## plot MCQ010 column
+fig1 = plt.figure(figsize=(8,6))
+plt.rc('font', size=12)
+ax = vals.plot.bar(rot=0, color='#4B8BBE')
+for i in range(len(vals)):
+    ax.annotate(vals[i], xy=[vals.index[i], vals[i]], ha='center', va='bottom')
+#plt.show()
+fig1.savefig('Data_overview.png', dpi = 300)
+
+# replace missing values using the most frequent value along each column
+from sklearn.impute import SimpleImputer
+imp_mode = SimpleImputer(strategy='most_frequent')
+df  = pd.DataFrame(imp_mode.fit_transform(df), columns=df.columns)
+
+# creat feature matrix and label column
+X_unscaled2 = df.loc[:, df.columns != 'MCQ010']
+X   = X_unscaled2.iloc[: , 1:]  # remove SEQN
+y   = df.MCQ010
+print('X shape:', X.shape)
+print('y shape:', y.shape)
+
+# scale feature matrix
+from sklearn import preprocessing
+scaler = preprocessing.MinMaxScaler()
+# X = pd.DataFrame(scaler.fit_transform(X_unscaled),columns=X_unscaled.columns)
+
+# 80/20 train/split 
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2,
+                                                    random_state=12)
+
+X_train = pd.DataFrame(scaler.fit_transform(X_train),columns=X_train.columns)
+X_test  = pd.DataFrame(scaler.fit_transform(X_test), columns=X_test.columns)
+X       = pd.DataFrame(scaler.fit_transform(X),      columns=X.columns)
+
+# oversampling with SMOTE
+smote = SMOTE()
+X_train_sm, y_train_sm = smote.fit_resample(X_train, y_train)
+X_train_sm = pd.DataFrame(X_train_sm, columns=X.columns)
+
+#####################    end of data preprocessing   ########################
+
+
+#======================================================
+#=============select number of features ===============
+###### Feature selection ###########
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import SelectFromModel
+from sklearn.model_selection import GridSearchCV
+from sklearn.feature_selection import RFE
+from sklearn.feature_selection import RFECV
+from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.model_selection import cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+
+
+### feature selection https://machinelearningmastery.com/rfe-feature-selection-in-python/
+# get a list of models to evaluate
+def ranking(ranks, names, order=1):
+    minmax = MinMaxScaler()
+    ranks = minmax.fit_transform(order*np.array([ranks]).T).T[0]
+    ranks = map(lambda x: round(x,2), ranks)
+    return dict(zip(names, ranks))
+
+# define confusion 
+def confusion(y_test, y_pred):
+    conf = pd.DataFrame(confusion_matrix(y_test, y_pred),
+                        index=['True[0]', 'True[1]'], columns=['Predict[0]', 'Predict[1]'])
+    print('Confusion Matrix:')
+    print(conf)
+    return conf
+
+n_samples = len(X_train_sm)
+k = int(n_samples/10)
+
+X_train_sm_sample = X_train_sm.sample(k)
+y_train_sm_sample = y_train_sm[X_train_sm_sample.index]
+
+# PLOT 2D PCA
+from sklearn.decomposition import PCA
+pca = PCA(n_components=2)
+pca.fit(X)
+X_pca = pca.transform(X)
+
+colors = np.array(['tab:blue', 'tab:red'])
+
+fig2 = plt.figure(figsize=(8, 6))
+plt.scatter(X_pca[:, 0], X_pca[:, 1], alpha=0.4,
+            c = y, cmap=matplotlib.colors.ListedColormap(colors))
+plt.xlabel('Component 1')
+plt.ylabel('Component 2')
+#plt.show()
+#fig2.savefig('PCA.png', dpi = 300)
+
+from sklearn.decomposition import PCA
+import plotly.express as px
+
+pca = PCA(n_components=3)
+components = pca.fit_transform(X)
+
+total_var = pca.explained_variance_ratio_.sum() * 100
+
+fig = px.scatter_3d(
+    components, x=0, y=1, z=2, color=y,
+    title=f'Total Explained Variance: {total_var:.2f}%',
+    labels={'0': 'PC 1', '1': 'PC 2', '2': 'PC 3'}
+)
+#fig.show()
+
+import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+
+def randrange(n, vmin, vmax):
+    return (vmax-vmin)*np.random.rand(n) + vmin
+
+# https://stackoverflow.com/questions/4739360/any-easy-way-to-plot-a-3d-scatter-in-python-that-i-can-rotate-around
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection='3d')
+
+xs = components[:,0]
+ys = components[:,1]
+zs = components[:,2]
+ax.scatter(xs, ys, zs, c=y, alpha=0.4, 
+               cmap=matplotlib.colors.ListedColormap(colors))
+
+ax.set_xlabel('PC1')
+ax.set_ylabel('PC2')
+ax.set_zlabel('PC3')
+
+plt.show()
+fig.savefig('PCA3D.png', dpi = 300)
